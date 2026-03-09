@@ -1,5 +1,9 @@
-import { Elysia } from 'elysia'
+import { Elysia, t } from 'elysia'
 import { supabaseAdmin } from '../lib/supabase'
+import { deleteFromCF } from '../lib/cloudflare'
+
+const SYS_CF_ACCOUNT_ID = process.env.CF_ACCOUNT_ID  ?? ''
+const SYS_CF_API_KEY    = process.env.CF_API_KEY     ?? ''
 
 const ADMIN_EMAIL = 'rinezpz@gmail.com'
 
@@ -78,4 +82,105 @@ export const adminRoutes = new Elysia({ prefix: '/admin' })
     if (dbErr) { set.status = 500; return { error: dbErr.message } }
     if (!data)  { set.status = 404; return { error: 'User not found' } }
     return data
+  })
+
+  // ── Admin Images ────────────────────────────────────────────────────
+
+  // GET /admin/images?page=&limit=&search=&user_id=
+  .get(
+    '/images',
+    async ({ query, set }) => {
+      const { page = '1', limit = '50', search, user_id } = query
+
+      const pageNum  = Math.max(1, Number(page))
+      const limitNum = Math.min(100, Math.max(1, Number(limit)))
+      const from = (pageNum - 1) * limitNum
+      const to   = from + limitNum - 1
+
+      let q = supabaseAdmin
+        .from('images')
+        .select('*', { count: 'exact' })
+        .order('uploaded_at', { ascending: false })
+        .range(from, to)
+
+      if (search)  q = q.ilike('filename', `%${search}%`)
+      if (user_id) q = q.eq('user_id', user_id)
+
+      const { data, error: dbErr, count } = await q
+      if (dbErr) { set.status = 500; return { error: dbErr.message } }
+
+      return {
+        data: data ?? [],
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total: count ?? 0,
+          total_pages: Math.ceil((count ?? 0) / limitNum),
+        },
+      }
+    },
+    {
+      query: t.Object({
+        page:    t.Optional(t.String()),
+        limit:   t.Optional(t.String()),
+        search:  t.Optional(t.String()),
+        user_id: t.Optional(t.String()),
+      }),
+    }
+  )
+
+  // DELETE /admin/images/bulk — must be before /:id to avoid param conflict
+  .delete(
+    '/images/bulk',
+    async ({ body, set }) => {
+      const { ids } = body
+      if (!ids.length) { set.status = 400; return { error: 'No IDs provided' } }
+
+      const { data: images, error: fetchErr } = await supabaseAdmin
+        .from('images')
+        .select('id, cf_image_id')
+        .in('id', ids)
+
+      if (fetchErr) { set.status = 500; return { error: fetchErr.message } }
+
+      if (SYS_CF_ACCOUNT_ID && SYS_CF_API_KEY) {
+        await Promise.allSettled(
+          (images ?? []).map(async (img: { id: string; cf_image_id: string | null }) => {
+            if (img.cf_image_id) {
+              await deleteFromCF(SYS_CF_ACCOUNT_ID, SYS_CF_API_KEY, img.cf_image_id)
+            }
+          })
+        )
+      }
+
+      const { error: dbErr } = await supabaseAdmin.from('images').delete().in('id', ids)
+      if (dbErr) { set.status = 500; return { error: dbErr.message } }
+      return { success: true, deleted_count: ids.length }
+    },
+    {
+      body: t.Object({
+        ids: t.Array(t.String(), { minItems: 1 }),
+      }),
+    }
+  )
+
+  // DELETE /admin/images/:id
+  .delete('/images/:id', async ({ params, set }) => {
+    const { data: image, error: fetchErr } = await supabaseAdmin
+      .from('images')
+      .select('id, cf_image_id')
+      .eq('id', params.id)
+      .single()
+
+    if (fetchErr || !image) { set.status = 404; return { error: 'Image not found' } }
+
+    const img = image as { id: string; cf_image_id: string | null }
+    if (img.cf_image_id && SYS_CF_ACCOUNT_ID && SYS_CF_API_KEY) {
+      try { await deleteFromCF(SYS_CF_ACCOUNT_ID, SYS_CF_API_KEY, img.cf_image_id) }
+      catch (err) { console.error('[CF admin delete]', err) }
+    }
+
+    const { error: dbErr } = await supabaseAdmin.from('images').delete().eq('id', params.id)
+    if (dbErr) { set.status = 500; return { error: dbErr.message } }
+    return { success: true, deleted_id: params.id }
   })

@@ -160,6 +160,24 @@ export const adminApi = {
   listUsers: () => req<ApprovalUser[]>('/admin/users'),
   approve: (userId: string) => req<ApprovalUser>(`/admin/users/${userId}/approve`, { method: 'POST' }),
   reject: (userId: string) => req<ApprovalUser>(`/admin/users/${userId}/reject`, { method: 'POST' }),
+
+  listImages: (params?: { page?: number; limit?: number; search?: string; user_id?: string }) => {
+    const q = new URLSearchParams()
+    if (params?.page)    q.set('page', String(params.page))
+    if (params?.limit)   q.set('limit', String(params.limit))
+    if (params?.search)  q.set('search', params.search)
+    if (params?.user_id) q.set('user_id', params.user_id)
+    return req<Paginated<ApiImage>>(`/admin/images?${q.toString()}`)
+  },
+
+  deleteImage: (id: string) =>
+    req<{ success: boolean; deleted_id: string }>(`/admin/images/${id}`, { method: 'DELETE' }),
+
+  deleteImagesBulk: (ids: string[]) =>
+    req<{ success: boolean; deleted_count: number }>('/admin/images/bulk', {
+      method: 'DELETE',
+      body: JSON.stringify({ ids }),
+    }),
 }
 
 // ──────────────────────────────────────────────────────────────────────
